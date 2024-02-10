@@ -1,0 +1,391 @@
+
+import datetime
+import os
+import sys
+import traceback
+import urllib.request
+import json
+import time
+import dateutil.parser
+from urllib.request import Request, urlopen
+import requests
+#import pandas as pd
+#from io import StringIO
+
+#For LIFX users:
+
+# You need a file named lifx_token in order for this to work
+# Put the directory (drive and path name) where the file is stored
+file_directory = "E:/nhl-notifier-master/"
+lifx_token_key_file = os.path.join(file_directory, 'lifx_token')
+try:
+    token = open(lifx_token_key_file)
+except FileNotFoundError:
+    print('You must put your LIFX private token key in a file named lifx_token')
+    exit()
+
+headers = {
+    "Authorization": "Bearer %s" % token,
+}
+
+
+scoredata = {
+    "period": 1,
+    "cycles": 5,
+    "color": "red",
+}
+
+powerplaydata = {
+    "period": 1,
+    "cycles": 5,
+    "color": "blue",
+}
+
+
+#For IFTTT users:
+
+# You need a file named private_key in order for this to work
+# Put the directory (drive and path name) where the file is stored
+file_directory = "E:/nhl-notifier-master/"
+private_key_file = os.path.join(file_directory, 'private_key')
+try:
+    private_file = open(private_key_file)
+except FileNotFoundError:
+    print('You must put your IFTTT private webhook key in a file named private_key')
+    exit()
+
+print ("NHL Notifier is now running....")
+IFTTT_KEY = private_file.readline().strip()
+
+#Seems to be the loweest you can set given the NHL API updates
+MAX_DELAY = 15
+MIN_DELAY = 5
+
+#Only interested in NHL.  If you want ECHL, change to "True"
+NHL = True
+ECHL = False
+
+private_file.close()
+
+
+class ECHLGame:
+    def __init__(self, home, away, home_score, away_score, started, final):
+        self.home = Team(home, home_score, 'echl')
+        self.away = Team(away, away_score, 'echl')
+        self.started = started
+        self.final = final
+
+    def time_delay(self):
+        if self.started == 1 and self.final == 0:
+            return MIN_DELAY
+        if self.started == 0:
+            return MAX_DELAY
+        # This means the game is over and we should get rid of it
+        return False
+
+
+class NHLGame:
+    def __init__(self, home, away, home_score, away_score, game_date):
+        self.home = Team(home, home_score)
+        self.away = Team(away, away_score)
+        self.game_date = game_date
+        self.game_status = None
+
+    def time_delay(self):
+        if self.game_status == 'LIVE': #all caps to match new api
+            return MIN_DELAY
+        now = datetime.datetime.now(datetime.timezone.utc)
+        time_delta = (self.game_date - now).total_seconds()
+        if time_delta < 0 and self.game_status == 'Preview': #check API... may need to be 'FUT'
+            return MIN_DELAY
+        if time_delta > 0:
+            return min(MAX_DELAY, time_delta)
+        # This means the game is over and we should get rid of it
+        return False
+
+
+class Team:
+    def __init__(self, team_name, team_score, league="nhl"):
+        self.team_name = team_name
+        self.league = league
+        if len(team_name) <= 3:
+            self.team_abbr = team_name
+        else:
+            self.team_abbr = NHLTeams.team_dict[team_name]
+        self.team_abbr_lower = self.team_abbr.lower()
+        self.__last_score = team_score
+        self.last_score = team_score
+        self.__in_power_play = False
+        self.in_power_play = False
+        self.team = None
+        self.__power_play_count = None
+        self.power_play_count = None
+
+    @property
+    def last_score(self):
+        return self.__last_score
+
+    @last_score.setter
+    def last_score(self, value):
+        if value > self.__last_score:  #goal scored only if number is greater, not "not equal to"
+            self.notify_of_score()
+            self.__last_score = value
+        else:
+            self.__last_score = value
+
+    @property
+    def in_power_play(self):
+        return self.__in_power_play
+
+    @in_power_play.setter
+    def in_power_play(self, value):
+        if value != self.__in_power_play:
+            if value:
+                self.notify_of_power_play()
+            self.__in_power_play = value
+
+    @property
+    def power_play_count(self):
+        return self.__power_play_count
+
+    @power_play_count.setter
+    def power_play_count(self, value):
+        if value is not None:
+            value = int(value)
+        if self.__power_play_count is None:
+            self.__power_play_count = value
+        else:
+            if value > self.__power_play_count:
+                self.notify_of_power_play()
+                self.__power_play_count = value
+
+    def notify_of_score(self):
+        print('SCORE', self.team_abbr)
+        preamble = ""
+
+#IFTTT code here...if you want to still use it, uncomment this out!
+        # if self.league != 'nhl':
+        #     preamble = self.league+"_"
+        # notification = ('https://maker.ifttt.com/trigger/'
+        #                 '{preamble}{team}_score/with/key/{ifttt}'.format(team=self.team_abbr_lower,
+        #                                                                  ifttt=IFTTT_KEY,
+        #                                                                  preamble=preamble))
+
+#LIFX API calls here directly.  You need to add your LIFX bulbs to the LIFX cloud (https://cloud.lifx.com) so they will get triggered.
+#Leafs fan here.  Only sends alerts for Toronto.  Change your team name here.
+        if self.team_abbr == 'TOR':  #set your team names here!!!
+            response = requests.post('https://api.lifx.com/v1/lights/all/effects/pulse', data=scoredata, headers=headers)
+        # print('Sending', notification)
+        # with urllib.request.urlopen(notification) as notify:
+        #     raw_response = notify.read()
+
+    def notify_of_power_play(self, ):
+        print('PP', self.team_abbr)
+        preamble = ""
+
+#IFTTT code here...if you want to still use it, uncomment this out!
+        #if self.league != 'nhl':
+        #    preamble = self.league + "_"
+        #notification = ('https://maker.ifttt.com/trigger/'
+        #                '{preamble}{team}_power_play/with/key/{ifttt}'.format(team=self.team_abbr_lower,
+        #                                                                      ifttt=IFTTT_KEY,
+        #                                                                      preamble=preamble))
+        #print('Sending', notification)
+        #with urllib.request.urlopen(notification) as notify:
+        #    raw_response = notify.read()
+#Leafs fan here.  Only sends alerts for Toronto.  Change your team name here.
+        if self.team_abbr == 'TOR':  #set your team names here!!!
+            response = requests.post('https://api.lifx.com/v1/lights/all/effects/pulse', data=powerplaydata, headers=headers)
+        
+
+class NHLTeams:
+    team_dict = {"Anaheim Ducks": "ANA",
+                 "Arizona Coyotes": "ARI",
+                 "Boston Bruins": "BOS",
+                 "Buffalo Sabres": "BUF",
+                 "Carolina Hurricanes": "CAR",
+                 "Columbus Blue Jackets": "CBJ",
+                 "Calgary Flames": "CGY",
+                 "Chicago Blackhawks": "CHI",
+                 "Colorado Avalanche": "COL",
+                 "Dallas Stars": "DAL",
+                 "Detroit Red Wings": "DET",
+                 "Edmonton Oilers": "EDM",
+                 "Florida Panthers": "FLA",
+                 "Los Angeles Kings": "LAK",
+                 "Minnesota Wild": "MIN",
+                 "Montreal Canadiens": "MTL",
+                 "Montréal Canadiens": "MTL",
+                 "New Jersey Devils": "NJD",
+                 "Nashville Predators": "NSH",
+                 "New York Islanders": "NYI",
+                 "New York Rangers": "NYR",
+                 "Ottawa Senators": "OTT",
+                 "Philadelphia Flyers": "PHI",
+                 "Pittsburgh Penguins": "PIT",
+                 "San Jose Sharks": "SJS",
+                 "Seattle Kraken": "SEA",
+                 "St. Louis Blues": "STL",
+                 "Tampa Bay Lightning": "TBL",
+                 "Toronto Maple Leafs": "TOR",
+                 "Vancouver Canucks": "VAN",
+                 "Vegas Golden Knights": "VGK",
+                 "Winnipeg Jets": "WPG",
+                 "Washington Capitals": "WSH"
+                 }
+
+
+nhl_games = dict()
+echl_games = dict()
+
+
+def check_nhl():
+    global nhl_games
+    try:
+        delay = MAX_DELAY
+        
+        #New NHL API for 2023-2024 season
+        #====================================================================================================
+        req = Request('https://api-web.nhle.com/v1/score/now', headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response:
+            raw_json = response.read().decode('utf8')
+        json_data = json.loads(raw_json)
+        #====================================================================================================
+
+    #TEST a JSON file.  You can save a file from the API when the games are going and then change the values here for testing
+        #==================================================================================
+        #f = open("E:/nhl-notifier-master/JSON/NHL JSON 2023-12-20.json", "r")
+        #f = open("E:/nhl-notifier-master/JSON/NHL JSON 2023-12-20 with power play about to start (goalie pulled).json", "r")
+        #f = open("E:/nhl-notifier-master/JSON/NHL JSON 2023-12-20 with power play on.json", "r")
+        #json_data = json.loads(f.read())
+        #===================================================================================
+
+        for game in json_data['games']: 
+            game_pk = game['id'] 
+            game_date = dateutil.parser.parse(game['gameDate'])
+            
+            if game_pk not in nhl_games:
+
+                if 'score' in game:
+                    nhl_games[game_pk] = NHLGame(game['homeTeam']['abbrev'],
+                                             game['awayTeam']['abbrev'],
+                                             game['homeTeam']['score'], 
+                                             game['awayTeam']['score'],
+                                             game_date)
+                else:
+                    nhl_games[game_pk] = NHLGame(game['homeTeam']['abbrev'],
+                                             game['awayTeam']['abbrev'],
+                                             0, #'score' doesn't exist until game starts.  "odds" value shows up
+                                             0,
+                                             game_date)
+                
+            nhl_games[game_pk].game_status = game['gameState']  #Values found: "CRIT", "FINAL", "OVER", "PRE", "LIVE", "OFF", "FUT"
+            if 'score' in game['homeTeam']:
+                nhl_games[game_pk].home.last_score = game['homeTeam']['score']  
+                nhl_games[game_pk].away.last_score = game['awayTeam']['score']
+            else:
+                nhl_games[game_pk].home.last_score = 0  #'score' doesn't exist until game starts.  "odds" value shows up
+                nhl_games[game_pk].away.last_score = 0
+            
+            if 'situation' in game:
+                if 'situationDescriptions' in game['situation']['homeTeam']:
+                    if game['situation']['homeTeam']['situationDescriptions'] == ['PP']:
+                        nhl_games[game_pk].home.in_power_play = True  #goals.[#].mugshot.strength ("EV")
+                elif 'situationDescriptions' in game['situation']['awayTeam']:
+                    if game['situation']['awayTeam']['situationDescriptions'] == ['PP']:
+                        nhl_games[game_pk].away.in_power_play = True
+                          #situation.situationCode or situation.home[away]Team.situationDescriptions.0
+
+#FROM ORIGINAL CODE - WAS GETTING AN ERROR SO STUBBED IT OUT!!!            
+        # for k in list(nhl_games.keys()):
+            #d = nhl_games[k].time_delay()  ##GETTING ERROR HERE????
+            #if not d:
+            #    del nhl_games[k]
+            # Check if game has ended and if so delete the game[k] object
+            #elif nhl_games[k].game_status == 'Final':
+            #elif nhl_games[k].game_status == 'FINAL':  #now status is upper cased
+            #    del nhl_games[k]
+            #else:
+            #    delay = min(d, delay)
+            
+            #d = nhl_games[k].time_delay()  ##GETTING ERROR HERE????
+            #if not d:
+            #    del nhl_games[k]
+            # Check if game has ended and if so delete the game[k] object
+            #elif nhl_games[k].game_status == 'Final':
+            # if nhl_games[k].game_status == 'FINAL' or 'OFF':  #now status is upper case.  OFF means game ended
+            #     print("about to del:")
+            #     print(nhl_games[k])
+            #     del nhl_games[k]
+            # else:
+            #     delay = min(10, delay)  #!!!what is it trying to do here???
+        return delay
+    except IndexError:
+        return MAX_DELAY
+    except Exception as e:
+        # If anything goes wrong with the load then retry in MIN_DELAY sec
+        print('Exception', e)
+        traceback.print_exc()
+        return MIN_DELAY
+
+
+#Assume ECHL code still works but have not tested it since original program was provided
+def check_echl():
+    try:
+        delay = MAX_DELAY
+        preamble = 'angular.callbacks._1i'
+        today = '{dt.year}-{dt.month}-{dt.day}'.format(dt=datetime.datetime.now())
+        echl_url = 'https://lscluster.hockeytech.com/feed/index.php?feed=statviewfeed&view=schedule_day&date={today}&site_id=1&key=e18cfddba0db3b21&client_code=echl&league_id=1&season_id=46&team=-1&lang=en&forceDate=false&callback=angular.callbacks._1i'.format(today=today)
+        with urllib.request.urlopen(echl_url) as response:
+            raw_json = response.read().decode('utf8')
+            raw_json = raw_json[len(preamble)+1:-1]
+            # with open(os.path.join(os.path.dirname(__file__), 'raw_data', str(time.time()) + '.json'), 'w') as json_file:
+            #     json_file.write(raw_json)
+            #     json_file.close()
+
+        json_data = json.loads(raw_json)
+        for game in json_data:
+            game_pk = game['id']
+            if game_pk not in echl_games:
+                echl_games[game_pk] = ECHLGame(game['homeTeam']['info']['abbreviation'],
+                                               game['visitingTeam']['info']['abbreviation'],
+                                               int(game['homeTeam']['stats']['goals']),
+                                               int(game['visitingTeam']['stats']['goals']),
+                                               int(game['started']),
+                                               int(game['final']))
+            echl_games[game_pk].home.last_score = int(game['homeTeam']['stats']['goals'])
+            echl_games[game_pk].away.last_score = int(game['visitingTeam']['stats']['goals'])
+            echl_games[game_pk].home.power_play_count = int(game['homeTeam']['stats']['powerPlayOpportunities'])
+            echl_games[game_pk].away.power_play_count = int(game['visitingTeam']['stats']['powerPlayOpportunities'])
+            echl_games[game_pk].started = int(game['started'])
+            echl_games[game_pk].final = int(game['final'])
+
+        for k in list(echl_games.keys()):
+            d = echl_games[k].time_delay()
+            if not d:
+                del echl_games[k]
+            else:
+                delay = min(d, delay)
+        return delay
+    except Exception as e:
+        # If anything goes wrong with the load then retry in MIN_DELAY sec
+        print('Exception', e)
+        traceback.print_exc()
+        return MIN_DELAY
+
+
+# check_echl()
+
+while True:
+    delay_for_repeat = MAX_DELAY
+    # NHL
+    if NHL:
+        delay_for_repeat = min(delay_for_repeat, check_nhl())
+    if ECHL:
+        delay_for_repeat = min(delay_for_repeat, check_echl())
+    sys.stdout.flush()
+    time.sleep(delay_for_repeat)
+
+
+
+
